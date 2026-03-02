@@ -38,8 +38,15 @@
         <TargetFramework>net8.0-windows</TargetFramework>
     </PropertyGroup>
 
-    <!-- Launch configuration -->
-    <PropertyGroup>
+    <!-- Launch configuration for Debug -->
+    <PropertyGroup Condition="$(Configuration.Contains('Debug'))">
+        <StartAction>Program</StartAction>
+        <StartProgram>C:\Program Files\Autodesk\Revit $(RevitVersion)\Revit.exe</StartProgram>
+        <StartArguments>/language ENG</StartArguments>
+    </PropertyGroup>
+    
+    <!-- Launch configuration for Release -->
+    <PropertyGroup Condition="$(Configuration.Contains('Release'))">
         <StartAction>Program</StartAction>
         <StartProgram>C:\Program Files\Autodesk\Revit $(RevitVersion)\Revit.exe</StartProgram>
         <StartArguments>/language ENG</StartArguments>
@@ -56,9 +63,17 @@
       <None Remove="Resources\Icons\icon2.png" />
       <None Remove="Resources\Icons\icon3.png" />
       <None Remove="Scripts\predict_and_return.py" />
+      <None Remove="Scripts\install_dependencies.bat" />
+      <None Remove="Temp\Ss_tabela_rows.json" />
     </ItemGroup>
     <ItemGroup>
       <Content Include="Scripts\predict_and_return.py">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </Content>
+      <Content Include="Scripts\install_dependencies.bat">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </Content>
+      <Content Include="Temp\Ss_tabela_rows.json">
         <CopyToOutputDirectory>Always</CopyToOutputDirectory>
       </Content>
     </ItemGroup>
@@ -77,7 +92,8 @@
         <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="$(RevitVersion).*" />
     </ItemGroup>
 
-    <ItemGroup>
+    <!-- Reference for .NET Framework 4.8 -->
+    <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
       <Reference Include="System.Windows.Forms" />
     </ItemGroup>
     
@@ -87,5 +103,68 @@
         <Resource Include="Resources\Icons\RibbonIcon16.png" />
         <Resource Include="Resources\Icons\RibbonIcon32.png" />
     </ItemGroup>
+
+    <Target Name="CopyScriptsAndModelsToRoaming" AfterTargets="Build">
+        <PropertyGroup>
+            <RoamingBase>$(APPDATA)\Autodesk\Revit\Addins\$(RevitVersion)\UniclassClassifier</RoamingBase>
+            <ScriptsSource>$(ProjectDir)Scripts\*.py</ScriptsSource>
+            <BatchSource>$(ProjectDir)Scripts\*.bat</BatchSource>
+            <ModelsSource>$(ProjectDir)Temp\*.pkl</ModelsSource>
+            <JsonSource>$(ProjectDir)Temp\Ss_tabela_rows.json</JsonSource>
+            <PythonSource>$(ProjectDir)Python\**\*.*</PythonSource>
+            <ScriptsDest>$(RoamingBase)\Scripts</ScriptsDest>
+            <ModelsDest>$(RoamingBase)\Temp</ModelsDest>
+            <PythonDest>$(RoamingBase)\Python</PythonDest>
+        </PropertyGroup>
+
+        <!-- Cria as pastas de destino se não existirem -->
+        <MakeDir Directories="$(ScriptsDest)" Condition="!Exists('$(ScriptsDest)')" />
+        <MakeDir Directories="$(ModelsDest)" Condition="!Exists('$(ModelsDest)')" />
+        <MakeDir Directories="$(PythonDest)" Condition="!Exists('$(PythonDest)') AND $(Configuration.Contains('Release'))" />
+
+        <!-- Copia os .py -->
+        <ItemGroup>
+            <PyFiles Include="$(ScriptsSource)" />
+        </ItemGroup>
+        <Copy
+            SourceFiles="@(PyFiles)"
+            DestinationFolder="$(ScriptsDest)"
+            SkipUnchangedFiles="true" />
+
+        <!-- Copia os .bat (apenas em Debug) -->
+        <ItemGroup Condition="$(Configuration.Contains('Debug'))">
+            <BatchFiles Include="$(BatchSource)" />
+        </ItemGroup>
+        <Copy
+            SourceFiles="@(BatchFiles)"
+            DestinationFolder="$(ScriptsDest)"
+            SkipUnchangedFiles="true"
+            Condition="$(Configuration.Contains('Debug'))" />
+
+        <!-- Copia os .pkl -->
+        <ItemGroup>
+            <PklFiles Include="$(ModelsSource)" />
+        </ItemGroup>
+        <Copy
+            SourceFiles="@(PklFiles)"
+            DestinationFolder="$(ModelsDest)"
+            SkipUnchangedFiles="true" />
+
+        <!-- Copia o JSON de descrições -->
+        <Copy
+            SourceFiles="$(JsonSource)"
+            DestinationFolder="$(ModelsDest)"
+            SkipUnchangedFiles="true" />
+        
+        <!-- Copia Python empacotado (apenas em Release, se existir) -->
+        <ItemGroup Condition="$(Configuration.Contains('Release')) AND Exists('$(ProjectDir)Python')">
+            <PythonFiles Include="$(PythonSource)" />
+        </ItemGroup>
+        <Copy
+            SourceFiles="@(PythonFiles)"
+            DestinationFolder="$(PythonDest)\%(RecursiveDir)"
+            SkipUnchangedFiles="true"
+            Condition="$(Configuration.Contains('Release')) AND Exists('$(ProjectDir)Python')" />
+    </Target>
 
 </Project>

@@ -6,8 +6,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Windows.Forms;
-using System.Windows.Media;
+using Microsoft.Win32;
 using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
@@ -29,7 +28,7 @@ namespace UniclassClassifier.Commands
             UIDocument uidoc = commandData.Application.ActiveUIDocument;
             Document doc = uidoc.Document;
 
-            // Passo 4: Diálogo para escolher local do ficheiro JSON
+            // Passo 4: Diálogo para escolher local do ficheiro JSON (usando WPF SaveFileDialog)
             SaveFileDialog saveFileDialog = new SaveFileDialog
             {
                 Filter = "JSON files (*.json)|*.json",
@@ -38,7 +37,7 @@ namespace UniclassClassifier.Commands
                 InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
             };
 
-            if (saveFileDialog.ShowDialog() != DialogResult.OK)
+            if (saveFileDialog.ShowDialog() != true)
                 return Result.Cancelled;
 
             string jsonPath = saveFileDialog.FileName;

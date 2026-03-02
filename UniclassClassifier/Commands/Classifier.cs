@@ -10,6 +10,8 @@ using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using Newtonsoft.Json;
+using UniclassClassifier.Utilities;
+using UniclassClassifier.Windows;
 
 namespace UniclassClassifier.Commands
 {
@@ -27,6 +29,29 @@ namespace UniclassClassifier.Commands
 
             try
             {
+                // Show configuration window
+                var configWindow = new ClassificationConfigWindow();
+                bool? result = configWindow.ShowDialog();
+
+                if (result != true || configWindow.WasCancelled)
+                {
+                    return Result.Cancelled;
+                }
+
+                double level1Threshold = configWindow.Level1Threshold;
+                double level2Threshold = configWindow.Level2Threshold;
+
+                // Start timer
+                var stopwatch = Stopwatch.StartNew();
+
+                // Primeiro, criar os parâmetros compartilhados se não existirem
+                using (Transaction tx = new Transaction(doc, "Criar Parâmetros Uniclass"))
+                {
+                    tx.Start();
+                    SharedParameterUtils.CreateSharedParameters(doc);
+                    tx.Commit();
+                }
+
                 string dllDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
                 string tempDir = Path.Combine(dllDir, "Temp");
                 string scriptPath = Path.Combine(dllDir, "Scripts", "predict_and_return.py");
@@ -54,28 +79,158 @@ namespace UniclassClassifier.Commands
                         }
                     }
                 }
-                // caminho original dos modelos (no teu projeto)
-                string originalModelDir = @"C:\Users\Admin\Documents\C#Revitaddon\UniclassClassifier\UniclassClassifier\Temp";
 
-                // destino no AppData\Roaming (dllDir)
+                // caminho original dos modelos (no teu projeto)
+                // NOTA: Os modelos já devem estar copiados para o AppData durante o build
+                // O MSBuild target "CopyScriptsAndModelsToRoaming" faz isto automaticamente
                 string targetModelDir = Path.Combine(dllDir, "Temp");
 
-                // Copiar os modelos se ainda não existirem
-                foreach (var modelFile in new[] { "decision_tree_sara_model.pkl", "label_encoder_sara_train.pkl" })
+                // Verificar se os modelos existem no destino (AppData)
+                // Se não existirem, tentar copiar da pasta do projeto (para desenvolvimento)
+                string[] requiredModels = { "model_level1.pkl", "encodertargetlevel1.pkl", "model_level2.pkl", "encodertargetlevel2.pkl" };
+                
+                foreach (var modelFile in requiredModels)
                 {
-                    string src = Path.Combine(originalModelDir, modelFile);
                     string dst = Path.Combine(targetModelDir, modelFile);
-
+                    
                     if (!File.Exists(dst))
-                        File.Copy(src, dst, true);
+                    {
+                        // Tentar encontrar na pasta do projeto (apenas para desenvolvimento)
+                        string projectTempDir = Path.Combine(Path.GetDirectoryName(dllDir), "Temp");
+                        string src = Path.Combine(projectTempDir, modelFile);
+                        
+                        if (File.Exists(src))
+                        {
+                            File.Copy(src, dst, true);
+                        }
+                        else
+                        {
+                            TaskDialog.Show("Erro - Modelos em Falta", 
+                                $"Modelo não encontrado: {modelFile}\n\n" +
+                                $"Esperado em: {dst}\n\n" +
+                                "Os modelos ML devem estar incluídos na instalação do plugin.\n" +
+                                "Certifique-se de que todos os ficheiros .pkl foram copiados corretamente.");
+                            return Result.Failed;
+                        }
+                    }
                 }
 
-                string pythonExe = @"C:\\Users\\Admin\\anaconda3\\envs\\Pyrevit\\python.exe";
+                // Detectar Python automaticamente
+                string pythonExe = PythonEnvironment.GetPythonPath();
+                
+                if (string.IsNullOrEmpty(pythonExe))
+                {
+                    TaskDialog.Show("Python não encontrado", 
+                        "Não foi possível encontrar o Python instalado no sistema.\n\n" +
+                        "Por favor, instale o Python 3.8 ou superior:\n" +
+                        "https://www.python.org/downloads/\n\n" +
+                        "Ou configure o caminho manualmente no código.");
+                    return Result.Failed;
+                }
+
+                // Obter informações do Python
+                string pythonVersion = PythonEnvironment.GetPythonVersion(pythonExe);
+                
+                // Verificar dependências
+                var (depsOk, depsMessage) = PythonEnvironment.CheckDependencies(pythonExe);
+                
+                if (!depsOk)
+                {
+                    // Perguntar se deseja instalar as dependências
+                    TaskDialog td = new TaskDialog("Dependências Python em Falta");
+                    td.MainInstruction = "Dependências Python Necessárias";
+                    td.MainContent = $"Python encontrado: {pythonVersion}\n" +
+                                    $"Localização: {pythonExe}\n\n" +
+                                    $"{depsMessage}\n\n" +
+                                    "Deseja instalar as dependências automaticamente?";
+                    
+                    td.AddCommandLink(TaskDialogCommandLinkId.CommandLink1, 
+                        "Instalar Automaticamente", 
+                        "O plugin irá instalar: scikit-learn, pandas, numpy, joblib, xgboost");
+                    
+                    td.AddCommandLink(TaskDialogCommandLinkId.CommandLink2, 
+                        "Instalar Manualmente", 
+                        "Abrir instruções para instalação manual");
+                    
+                    td.CommonButtons = TaskDialogCommonButtons.Close;
+                    td.DefaultButton = TaskDialogResult.CommandLink1;
+                    
+                    TaskDialogResult tdResult = td.Show();
+                    
+                    if (tdResult == TaskDialogResult.CommandLink1)
+                    {
+                        // Instalar automaticamente
+                        TaskDialog progressDialog = new TaskDialog("Instalando Dependências");
+                        progressDialog.MainInstruction = "A instalar dependências Python...";
+                        progressDialog.MainContent = "Por favor aguarde. Isto pode demorar alguns minutos.";
+                        progressDialog.CommonButtons = TaskDialogCommonButtons.None;
+                        
+                        var (installOk, installMessage) = PythonEnvironment.InstallDependencies(pythonExe);
+                        
+                        if (!installOk)
+                        {
+                            TaskDialog.Show("Erro na Instalação", 
+                                $"Erro ao instalar dependências:\n\n{installMessage}\n\n" +
+                                "Por favor, instale manualmente usando:\n" +
+                                $"{pythonExe} -m pip install scikit-learn pandas joblib numpy xgboost");
+                            return Result.Failed;
+                        }
+                        
+                        TaskDialog.Show("Instalação Completa", 
+                            "Dependências instaladas com sucesso!\n\n" +
+                            "Execute o comando novamente para classificar os elementos.");
+                        return Result.Succeeded;
+                    }
+                    else if (tdResult == TaskDialogResult.CommandLink2)
+                    {
+                        // Mostrar instruções manuais
+                        TaskDialog.Show("Instalação Manual",
+                            "Para instalar as dependências manualmente:\n\n" +
+                            "1. Abra o Command Prompt (cmd) como Administrador\n\n" +
+                            "2. Execute os seguintes comandos:\n\n" +
+                            $"   {pythonExe} -m pip install scikit-learn\n" +
+                            $"   {pythonExe} -m pip install pandas\n" +
+                            $"   {pythonExe} -m pip install joblib\n" +
+                            $"   {pythonExe} -m pip install numpy\n" +
+                            $"   {pythonExe} -m pip install xgboost\n\n" +
+                            "3. Após a instalação, execute este comando novamente.");
+                        return Result.Cancelled;
+                    }
+                    else
+                    {
+                        return Result.Cancelled;
+                    }
+                }
+                
+                // Verificar se todos os ficheiros necessários existem
+                if (!File.Exists(scriptPath))
+                {
+                    TaskDialog.Show("Erro", $"Script Python não encontrado em:\n{scriptPath}\n\nVerifique a instalação do add-in.");
+                    return Result.Failed;
+                }
+                
+                // Verificar se os modelos existem
+                string[] requiredModelFiles = { "model_level1.pkl", "encodertargetlevel1.pkl", "model_level2.pkl", "encodertargetlevel2.pkl" };
+                foreach (var modelFile in requiredModelFiles)
+                {
+                    string modelPath = Path.Combine(modelDir, modelFile);
+                    if (!File.Exists(modelPath))
+                    {
+                        TaskDialog.Show("Erro", $"Modelo não encontrado:\n{modelPath}\n\nVerifique se os modelos foram copiados corretamente.");
+                        return Result.Failed;
+                    }
+                }
+                
+                // Pass thresholds as arguments to Python script
+                string level1ThresholdStr = level1Threshold.ToString("0.00", CultureInfo.InvariantCulture);
+                string level2ThresholdStr = level2Threshold.ToString("0.00", CultureInfo.InvariantCulture);
+                
                 var psi = new ProcessStartInfo
                 {
                     FileName = pythonExe,
-                    Arguments = $"\"{scriptPath}\" \"{csvPath}\" \"{jsonPath}\" \"{modelDir}\"",
-                    UseShellExecute = false,  // ✅ TEM de estar aqui antes do redirecionamento
+                    Arguments = $"\"{scriptPath}\" \"{csvPath}\" \"{jsonPath}\" \"{modelDir}\" {level1ThresholdStr} {level2ThresholdStr}",
+                    WorkingDirectory = dllDir,  // Definir o diretório de trabalho
+                    UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true
@@ -89,7 +244,12 @@ namespace UniclassClassifier.Commands
 
                     if (process.ExitCode != 0)
                     {
-                        TaskDialog.Show("Erro no script", stderr);
+                        // Mostrar detalhes completos do erro
+                        string errorDetails = $"Python Error:\n{stderr}\n\nOutput:\n{stdout}\n\n" +
+                                            $"Script: {scriptPath}\n" +
+                                            $"Working Dir: {dllDir}\n" +
+                                            $"Python: {pythonExe}";
+                        TaskDialog.Show("Erro no script", errorDetails);
                         return Result.Failed;
                     }
                 }
@@ -100,38 +260,63 @@ namespace UniclassClassifier.Commands
                     return Result.Failed;
                 }
 
-                // ✅ Garante que o parâmetro existe antes de aplicar
-                //EnsureUniclassParameterExists(doc);
-
                 // Ler classificações
-                var classificationResults = JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(classifiedPath));
+                var classificationResults = JsonConvert.DeserializeObject<Dictionary<string, ClassificationResult>>(File.ReadAllText(classifiedPath));
 
+                // Apply classifications to Revit elements
                 using (Transaction tx = new Transaction(doc, "Aplicar Classificação Uniclass"))
                 {
                     tx.Start();
 
                     foreach (var kvp in classificationResults)
                     {
-                        // ✅ Parse do ID do elemento
                         if (int.TryParse(kvp.Key, out int eid))
                         {
                             Element elem = doc.GetElement(new ElementId(eid));
                             if (elem == null) continue;
 
-                            // ✅ Tenta encontrar o parâmetro Uniclass_Code
-                            Parameter p = elem.LookupParameter("Classification.Uniclass.Ss.Number");
+                            // Se não foi classificado, pula
+                            if (kvp.Value.level == "none")
+                                continue;
 
-                            if (p != null && !p.IsReadOnly)
+                            // Parâmetro Uniclass Code
+                            Parameter pUniclass = elem.LookupParameter("Classification.Uniclass.Ss.Number");
+                            if (pUniclass != null && !pUniclass.IsReadOnly)
                             {
-                                // ✅ Escreve diretamente no parâmetro
-                                p.Set(kvp.Value);
+                                pUniclass.Set(kvp.Value.classification);
                             }
-                            else
+
+                            // Parâmetro Uniclass Description (VLOOKUP)
+                            Parameter pDescription = elem.LookupParameter("Classification.Uniclass.Ss.Description");
+                            if (pDescription != null && !pDescription.IsReadOnly)
                             {
-                                // ✅ Se não existir, escreve no Comments como backup
-                                Parameter comments = elem.LookupParameter("Comments");
-                                if (comments != null && !comments.IsReadOnly)
-                                    comments.Set($"Uniclass: {kvp.Value}");
+                                string description = UniclassLookup.GetDescription(kvp.Value.classification);
+                                if (!string.IsNullOrEmpty(description))
+                                {
+                                    pDescription.Set(description);
+                                }
+                            }
+
+                            // Parâmetro Confiança
+                            Parameter pConf = elem.LookupParameter("Classification.Uniclass.Confidence");
+                            if (pConf != null && !pConf.IsReadOnly)
+                            {
+                                pConf.Set(kvp.Value.confidence);
+                            }
+
+                            // Parâmetro Nível (agora Granularity)
+                            Parameter pLevel = elem.LookupParameter("Classification.Uniclass.Granularity");
+                            if (pLevel != null && !pLevel.IsReadOnly)
+                            {
+                                // Map level_1 to "Group" and level_2 to "Subgroup"
+                                string granularityValue = kvp.Value.level switch
+                                {
+                                    "level_1" => "Group",
+                                    "level_2" => "Subgroup",
+                                    "none" => "Unclassified",
+                                    _ => kvp.Value.level
+                                };
+                                pLevel.Set(granularityValue);
                             }
                         }
                     }
@@ -139,7 +324,151 @@ namespace UniclassClassifier.Commands
                     tx.Commit();
                 }
 
-                TaskDialog.Show("Sucesso", "Classificações aplicadas com sucesso.");
+                stopwatch.Stop();
+
+                // Calcular estatísticas
+                int total = classificationResults.Count;
+                int nUnclassified = classificationResults.Count(r => r.Value.level == "none");
+                int nLevel1 = classificationResults.Count(r => r.Value.level == "level_1");
+                int nLevel2 = classificationResults.Count(r => r.Value.level == "level_2");
+
+                // Show results window in a loop to allow reclassification
+                bool shouldReclassify = true;
+                while (shouldReclassify)
+                {
+                    var resultsWindow = new ClassificationResultsWindow(
+                        doc,
+                        classificationResults,
+                        total,
+                        nUnclassified,
+                        nLevel1,
+                        nLevel2,
+                        level1Threshold,
+                        level2Threshold,
+                        stopwatch.Elapsed.TotalSeconds
+                    );
+                    
+                    bool? resultsDialogResult = resultsWindow.ShowDialog();
+                    
+                    // Check if user wants to reclassify
+                    if (resultsDialogResult == true && resultsWindow.Tag is ReclassifyRequest reclassifyReq)
+                    {
+                        // User clicked "Back to Configuration" and set new thresholds
+                        level1Threshold = reclassifyReq.Level1Threshold;
+                        level2Threshold = reclassifyReq.Level2Threshold;
+                        
+                        // Restart timer for new classification
+                        stopwatch.Restart();
+                        
+                        // Re-run Python script with new thresholds
+                        string level1ThresholdStr2 = level1Threshold.ToString("0.00", CultureInfo.InvariantCulture);
+                        string level2ThresholdStr2 = level2Threshold.ToString("0.00", CultureInfo.InvariantCulture);
+                        
+                        var psi2 = new ProcessStartInfo
+                        {
+                            FileName = pythonExe,
+                            Arguments = $"\"{scriptPath}\" \"{csvPath}\" \"{jsonPath}\" \"{modelDir}\" {level1ThresholdStr2} {level2ThresholdStr2}",
+                            WorkingDirectory = dllDir,  // Definir o diretório de trabalho
+                            UseShellExecute = false,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            CreateNoWindow = true
+                        };
+
+                        using (var process = Process.Start(psi2))
+                        {
+                            string stdout = process.StandardOutput.ReadToEnd();
+                            string stderr = process.StandardError.ReadToEnd();
+                            process.WaitForExit();
+
+                            if (process.ExitCode != 0)
+                            {
+                                TaskDialog.Show("Erro no script", stderr);
+                                return Result.Failed;
+                            }
+                        }
+                        
+                        // Read new classifications
+                        classificationResults = JsonConvert.DeserializeObject<Dictionary<string, ClassificationResult>>(File.ReadAllText(classifiedPath));
+                        
+                        // Apply new classifications
+                        using (Transaction tx2 = new Transaction(doc, "Aplicar Classificação Uniclass (Reclassify)"))
+                        {
+                            tx2.Start();
+
+                            foreach (var kvp in classificationResults)
+                            {
+                                if (int.TryParse(kvp.Key, out int eid))
+                                {
+                                    Element elem = doc.GetElement(new ElementId(eid));
+                                    if (elem == null) continue;
+
+                                    // Se não foi classificado, pula
+                                    if (kvp.Value.level == "none")
+                                        continue;
+
+                                    // Parâmetro Uniclass Code
+                                    Parameter pUniclass = elem.LookupParameter("Classification.Uniclass.Ss.Number");
+                                    if (pUniclass != null && !pUniclass.IsReadOnly)
+                                    {
+                                        pUniclass.Set(kvp.Value.classification);
+                                    }
+
+                                    // Parâmetro Uniclass Description (VLOOKUP)
+                                    Parameter pDescription = elem.LookupParameter("Classification.Uniclass.Ss.Description");
+                                    if (pDescription != null && !pDescription.IsReadOnly)
+                                    {
+                                        string description = UniclassLookup.GetDescription(kvp.Value.classification);
+                                        if (!string.IsNullOrEmpty(description))
+                                        {
+                                            pDescription.Set(description);
+                                        }
+                                    }
+
+                                    // Parâmetro Confiança
+                                    Parameter pConf = elem.LookupParameter("Classification.Uniclass.Confidence");
+                                    if (pConf != null && !pConf.IsReadOnly)
+                                    {
+                                        pConf.Set(kvp.Value.confidence);
+                                    }
+
+                                    // Parâmetro Nível (agora Granularity)
+                                    Parameter pLevel = elem.LookupParameter("Classification.Uniclass.Granularity");
+                                    if (pLevel != null && !pLevel.IsReadOnly)
+                                    {
+                                        // Map level_1 to "Group" and level_2 to "Subgroup"
+                                        string granularityValue = kvp.Value.level switch
+                                        {
+                                            "level_1" => "Group",
+                                            "level_2" => "Subgroup",
+                                            "none" => "Unclassified",
+                                            _ => kvp.Value.level
+                                        };
+                                        pLevel.Set(granularityValue);
+                                    }
+                                }
+                            }
+
+                            tx2.Commit();
+                        }
+                        
+                        stopwatch.Stop();
+                        
+                        // Recalculate statistics
+                        total = classificationResults.Count;
+                        nUnclassified = classificationResults.Count(r => r.Value.level == "none");
+                        nLevel1 = classificationResults.Count(r => r.Value.level == "level_1");
+                        nLevel2 = classificationResults.Count(r => r.Value.level == "level_2");
+                        
+                        // Continue loop to show new results
+                    }
+                    else
+                    {
+                        // User closed window normally, exit loop
+                        shouldReclassify = false;
+                    }
+                }
+
                 return Result.Succeeded;
             }
             catch (Exception ex)
@@ -147,10 +476,13 @@ namespace UniclassClassifier.Commands
                 string dllDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
                 string tempDir = Path.Combine(dllDir, "Temp");
                 string scriptPath = Path.Combine(dllDir, "Scripts", "predict_and_return.py");
+                string pythonExe = @"C:\Users\Admin\anaconda3\envs\Pyrevit\python.exe";
 
                 string detalhesErro = $"Erro: {ex.Message}\n\n" +
-                                      $"Script: {scriptPath}\n" +
-                                      $"Temp: {tempDir}\n\n" +
+                                      $"Python exe: {pythonExe} (Exists: {File.Exists(pythonExe)})\n" +
+                                      $"Script: {scriptPath} (Exists: {File.Exists(scriptPath)})\n" +
+                                      $"DLL Dir: {dllDir}\n" +
+                                      $"Temp Dir: {tempDir}\n\n" +
                                       $"Stack Trace:\n{ex.StackTrace}";
 
                 TaskDialog.Show("Erro no Classifier", detalhesErro);
@@ -395,8 +727,518 @@ namespace UniclassClassifier.Commands
             }
             return ("None", "None", "None", "None", "None", "None");
         }
-       
-    }
-}
+    } // <--- ESTA CHAVE FECHA A CLASSIFIERCOMMAND
+} // <--- ESTA CHAVE FECHA O NAMESPACE
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
