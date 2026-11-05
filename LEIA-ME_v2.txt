@@ -1,0 +1,30 @@
+Uniclass Classifier v2 (add-in para Revit)
+==========================================
+
+Como saber que é a versão 2
+  - No Revit aparece um separador novo "Uniclass v2", com o botão "AI Classifier v2" e o painel "Data" (Export, Info).
+  - Info mostra "Uniclass Classifier v2.0 (model 1.1)".
+  - Ao classificar, pede dois limiares (por defeito 0,8) e no fim mostra: Nível 2, Nível 1, para revisão
+    e quantos foram assinalados pela verificação da categoria. Os elementos para revisão ficam selecionados.
+  - Só escreve códigos de Nível 1 (ex. Ss_25) ou Nível 2 (ex. Ss_25_13), nunca Ss_25_13_50.
+
+Antes de instalar
+  - Fechar o Revit. Para não confundir, retirar a versão antiga: em %AppData%\Autodesk\Revit\Addins\<ano>\
+    mover para outra pasta o .addin antigo e a pasta do add-in antigo.
+
+Compilar
+  1. Abrir UniclassClassifier.sln no Visual Studio / Rider.
+  2. Escolher a configuração do Revit instalado (ex. "Release R25" para o Revit 2025, "Release R26" para 2026).
+  3. Build. O add-in é copiado para %AppData%\Autodesk\Revit\Addins\<ano>\ (UniclassClassifier_v2.addin e a pasta
+     UniclassClassifier_v2\ com a DLL, Scripts\ e Scripts\model_v1\).
+  4. Confirmar que a pasta Scripts\model_v1 tem uniclass_v1.joblib e uniclass_v1_xgb.json (estão no zip;
+     não estão no GitHub porque contêm n-gramas dos nomes dos modelos confidenciais).
+
+Python
+  - O add-in chama Scripts\predict_v1.py. Precisa de um Python com os pacotes de Scripts\requirements_v1.txt
+    (scikit-learn 1.9.1, xgboost 3.x, pandas, numpy, joblib):  pip install -r requirements_v1.txt
+  - Definir a variável de ambiente UNICLASS_PYTHON com o caminho do python.exe desse ambiente
+    (ex. C:\Users\sara_parece\anaconda3\envs\uniclass\python.exe). Sem a variável, usa o "python" do PATH.
+
+Ficheiros IFC (sem Revit)
+  python Scripts\predict_ifc.py modelo.ifc resultado.csv Scripts\model_v1 0.8 0.8
