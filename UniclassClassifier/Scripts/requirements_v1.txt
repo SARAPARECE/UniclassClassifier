@@ -1,0 +1,8 @@
+# Python packages for predict_v1.py (versions used to train model_v1)
+pandas>=2.2
+numpy>=1.26
+scikit-learn==1.9.1
+xgboost>=3.0
+joblib>=1.4
+# IFC input (predict_ifc.py)
+ifcopenshell>=0.8

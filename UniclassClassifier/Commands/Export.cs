@@ -6,7 +6,6 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Windows.Forms;
 using System.Windows.Media;
 using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
@@ -18,6 +17,16 @@ namespace UniclassClassifier.Commands
     [Transaction(TransactionMode.Manual)]
     public class ExportCommand : IExternalCommand
     {
+        // ElementId as text (IntegerValue was replaced by Value in Revit 2024)
+        private static string IdString(ElementId id)
+        {
+#if REVIT2024_OR_GREATER
+            return id.Value.ToString();
+#else
+            return id.IntegerValue.ToString();
+#endif
+        }
+
         // Passo 2: Constantes de conversão
         private const double FeetToMeter = 0.3048;
         private const double Ft2ToM2 = 0.092903;
@@ -30,7 +39,7 @@ namespace UniclassClassifier.Commands
             Document doc = uidoc.Document;
 
             // Passo 4: Diálogo para escolher local do ficheiro JSON
-            SaveFileDialog saveFileDialog = new SaveFileDialog
+            var saveFileDialog = new Microsoft.Win32.SaveFileDialog   // WPF dialog, no Windows Forms reference needed
             {
                 Filter = "JSON files (*.json)|*.json",
                 Title = "Escolher onde guardar o ficheiro JSON",
@@ -38,7 +47,7 @@ namespace UniclassClassifier.Commands
                 InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
             };
 
-            if (saveFileDialog.ShowDialog() != DialogResult.OK)
+            if (saveFileDialog.ShowDialog() != true)
                 return Result.Cancelled;
 
             string jsonPath = saveFileDialog.FileName;
@@ -81,7 +90,7 @@ namespace UniclassClassifier.Commands
                     var centroid = GetCentroid(elem);
 
                     // Passo 7: Parâmetros básicos de identificação
-                    data["ElementID"] = elem.Id.IntegerValue.ToString();
+                    data["ElementID"] = IdString(elem.Id);
                     data["SECClass_Code_EF"] = GetParamValue(type, "ClassificacaoSecclassEFNumero");
                     data["SECClass_Title_EF"] = GetParamValue(type, "ClassificacaoSecclassEFDescricao");
                     data["SECClasS_Code_Ss"] = GetParamValue(type, "ClassificacaoSecclassSsNumero");
@@ -89,7 +98,7 @@ namespace UniclassClassifier.Commands
                     data["SECClass_Code_Pr"] = GetParamValue(type, "ClassificacaoSecclassPrNumero");
                     data["SECClass_Title_Pr"] = GetParamValue(type, "ClassificacaoSecclassPrDescricao");
                     data["Family and Type"] = FormatString($"{type.FamilyName} - {type.Name}");
-                    data["Category"] = FormatString(elem.Category?.Name);
+                    data["Category"] = ClassifierCommand.CategoryName(bic, elem);
                     data["Volume"] = GetDouble(elem, BuiltInParameter.HOST_VOLUME_COMPUTED, Ft3ToM3);
                     data["Area"] = GetDouble(elem, BuiltInParameter.HOST_AREA_COMPUTED, Ft2ToM2);
                     data["Volume_to_Surface_Area_Ratio"] = "None";
