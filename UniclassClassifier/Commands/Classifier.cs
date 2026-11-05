@@ -9,35 +9,114 @@ using System.Text;
 using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
+using CsvHelper;
+using CsvHelper.Configuration;
 using Newtonsoft.Json;
+using UniclassClassifier.Views;
 
 namespace UniclassClassifier.Commands
 {
     [Transaction(TransactionMode.Manual)]
     public class ClassifierCommand : IExternalCommand
     {
+        // ElementId as text (IntegerValue was replaced by Value in Revit 2024)
+        private static string IdString(ElementId id)
+        {
+#if REVIT2024_OR_GREATER
+            return id.Value.ToString();
+#else
+            return id.IntegerValue.ToString();
+#endif
+        }
+
+        private const double DefaultTau = 0.8;
+
+        // English category names as used in the training data, independent of the language of Revit
+        private static readonly Dictionary<BuiltInCategory, string> CategoryNames = new Dictionary<BuiltInCategory, string>
+        {
+            [BuiltInCategory.OST_Walls] = "Walls",
+            [BuiltInCategory.OST_Floors] = "Floors",
+            [BuiltInCategory.OST_Roofs] = "Roofs",
+            [BuiltInCategory.OST_StructuralColumns] = "Structural Columns",
+            [BuiltInCategory.OST_StructuralFraming] = "Structural Framing",
+            [BuiltInCategory.OST_Columns] = "Columns",
+            [BuiltInCategory.OST_Doors] = "Doors",
+            [BuiltInCategory.OST_Windows] = "Windows",
+            [BuiltInCategory.OST_CurtainWallPanels] = "Curtain Panels",
+            [BuiltInCategory.OST_Stairs] = "Stairs",
+            [BuiltInCategory.OST_StructuralFoundation] = "Structural Foundations"
+        };
+
+        public static string CategoryName(BuiltInCategory bic, Element elem)
+        {
+            if (CategoryNames.TryGetValue(bic, out var name)) return name;
+            var n = elem.Category?.Name;
+            return string.IsNullOrWhiteSpace(n) ? "None" : n;
+        }
+
+        private class ClassificationSummary
+        {
+            public int n { get; set; }
+            public int L2 { get; set; }
+            public int L1 { get; set; }
+            public int review { get; set; }
+            public double tau_L2 { get; set; }
+            public double tau_L1 { get; set; }
+            public List<string>? review_ids { get; set; }
+            public int category_check { get; set; }
+        }
+
+        // ElementId from the id written by the Python script (Int64 ids from Revit 2024)
+        private static ElementId ToElementId(long v)
+        {
+#if REVIT2024_OR_GREATER
+            return new ElementId(v);
+#else
+            return new ElementId((int)v);
+#endif
+        }
         private const double FeetToMeter = 0.3048;
         private const double Ft2ToM2 = 0.092903;
         private const double Ft3ToM3 = 0.0283168;
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
+            var exportTime = TimeSpan.Zero;
+            var filePreparationTime = TimeSpan.Zero;
+            var pythonTime = TimeSpan.Zero;
+            var reportReadingTime = TimeSpan.Zero;
+            var groupingTime = TimeSpan.Zero;
             UIDocument uidoc = commandData.Application.ActiveUIDocument;
             Document doc = uidoc.Document;
+
+            // Confidence thresholds for Level 2 (Sub-group) and Level 1 (Group)
+            var dialog = new ThresholdDialog(DefaultTau, DefaultTau);
+            new System.Windows.Interop.WindowInteropHelper(dialog).Owner = commandData.Application.MainWindowHandle;
+            if (dialog.ShowDialog() != true)
+                return Result.Cancelled;
 
             try
             {
                 string dllDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
                 string tempDir = Path.Combine(dllDir, "Temp");
-                string scriptPath = Path.Combine(dllDir, "Scripts", "predict_and_return.py");
+                string scriptPath = Path.Combine(dllDir, "Scripts", "predict_v1.py");
 
                 Directory.CreateDirectory(tempDir);
                 string jsonPath = Path.Combine(tempDir, "export.json");
                 string csvPath = Path.Combine(tempDir, "export.csv");
                 string classifiedPath = Path.Combine(tempDir, "classified.json");
-                string modelDir = Path.Combine(dllDir, "Temp");
+                string modelDir = Path.Combine(dllDir, "Scripts", "model_v1");
+                string summaryPath = Path.Combine(tempDir, "summary.json");
+                string reportPath = Path.Combine(tempDir, "classified_report.csv");
+                foreach (var old in new[] { classifiedPath, summaryPath, reportPath })
+                    if (File.Exists(old)) File.Delete(old);
 
+                var stage = Stopwatch.StartNew();
                 var exportData = ExportElementData(doc);
+                stage.Stop();
+                exportTime = stage.Elapsed;
+
+                stage.Restart();
                 File.WriteAllText(jsonPath, JsonConvert.SerializeObject(exportData, Formatting.Indented));
 
                 using (var writer = new StreamWriter(csvPath, false, new UTF8Encoding(true)))
@@ -54,33 +133,26 @@ namespace UniclassClassifier.Commands
                         }
                     }
                 }
-                // caminho original dos modelos (no teu projeto)
-                string originalModelDir = @"C:\Users\Admin\Documents\C#Revitaddon\UniclassClassifier\UniclassClassifier\Temp";
-
-                // destino no AppData\Roaming (dllDir)
-                string targetModelDir = Path.Combine(dllDir, "Temp");
-
-                // Copiar os modelos se ainda não existirem
-                foreach (var modelFile in new[] { "decision_tree_sara_model.pkl", "label_encoder_sara_train.pkl" })
-                {
-                    string src = Path.Combine(originalModelDir, modelFile);
-                    string dst = Path.Combine(targetModelDir, modelFile);
-
-                    if (!File.Exists(dst))
-                        File.Copy(src, dst, true);
-                }
-
-                string pythonExe = @"C:\\Users\\Admin\\anaconda3\\envs\\Pyrevit\\python.exe";
+                stage.Stop();
+                filePreparationTime = stage.Elapsed;
+                // Python environment with pandas, scikit-learn and xgboost (see Scripts/requirements_v1.txt);
+                // the environment variable UNICLASS_PYTHON overrides the default path
+                string pythonExe = Environment.GetEnvironmentVariable("UNICLASS_PYTHON")
+                                   ?? @"C:\\Users\\Admin\\anaconda3\\envs\\Pyrevit\\python.exe";
+                if (!File.Exists(pythonExe))
+                    pythonExe = "python";   // Python on the PATH
                 var psi = new ProcessStartInfo
                 {
                     FileName = pythonExe,
-                    Arguments = $"\"{scriptPath}\" \"{csvPath}\" \"{jsonPath}\" \"{modelDir}\"",
+                    Arguments = $"\"{scriptPath}\" \"{csvPath}\" \"{jsonPath}\" \"{modelDir}\" " +
+                                $"{dialog.TauLevel2.ToString(CultureInfo.InvariantCulture)} {dialog.TauLevel1.ToString(CultureInfo.InvariantCulture)}",
                     UseShellExecute = false,  // ✅ TEM de estar aqui antes do redirecionamento
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 };
 
+                var pythonStopwatch = Stopwatch.StartNew();
                 using (var process = Process.Start(psi))
                 {
                     string stdout = process.StandardOutput.ReadToEnd();
@@ -89,10 +161,12 @@ namespace UniclassClassifier.Commands
 
                     if (process.ExitCode != 0)
                     {
-                        TaskDialog.Show("Erro no script", stderr);
+                        TaskDialog.Show("Erro no script", string.IsNullOrWhiteSpace(stderr) ? stdout : stderr);
                         return Result.Failed;
                     }
                 }
+                pythonStopwatch.Stop();
+                pythonTime = pythonStopwatch.Elapsed;
 
                 if (!File.Exists(classifiedPath))
                 {
@@ -100,53 +174,40 @@ namespace UniclassClassifier.Commands
                     return Result.Failed;
                 }
 
-                // ✅ Garante que o parâmetro existe antes de aplicar
-                //EnsureUniclassParameterExists(doc);
-
-                // Ler classificações
-                var classificationResults = JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(classifiedPath));
-
-                using (Transaction tx = new Transaction(doc, "Aplicar Classificação Uniclass"))
+                if (!File.Exists(reportPath))
                 {
-                    tx.Start();
-
-                    foreach (var kvp in classificationResults)
-                    {
-                        // ✅ Parse do ID do elemento
-                        if (int.TryParse(kvp.Key, out int eid))
-                        {
-                            Element elem = doc.GetElement(new ElementId(eid));
-                            if (elem == null) continue;
-
-                            // ✅ Tenta encontrar o parâmetro Uniclass_Code
-                            Parameter p = elem.LookupParameter("Classification.Uniclass.Ss.Number");
-
-                            if (p != null && !p.IsReadOnly)
-                            {
-                                // ✅ Escreve diretamente no parâmetro
-                                p.Set(kvp.Value);
-                            }
-                            else
-                            {
-                                // ✅ Se não existir, escreve no Comments como backup
-                                Parameter comments = elem.LookupParameter("Comments");
-                                if (comments != null && !comments.IsReadOnly)
-                                    comments.Set($"Uniclass: {kvp.Value}");
-                            }
-                        }
-                    }
-
-                    tx.Commit();
+                    TaskDialog.Show("Erro", "Ficheiro 'classified_report.csv' não encontrado.");
+                    return Result.Failed;
                 }
 
-                TaskDialog.Show("Sucesso", "Classificações aplicadas com sucesso.");
+                var titlesPath = Path.Combine(dllDir, "Scripts", "ss_titles.json");
+                var titles = ReadTitles(titlesPath);
+                stage.Restart();
+                var reportRows = ReadReport(reportPath);
+                stage.Stop();
+                reportReadingTime = stage.Elapsed;
+                stage.Restart();
+                var typeRows = ClassificationGrouping.Build(reportRows, titles);
+                stage.Stop();
+                groupingTime = stage.Elapsed;
+                var resultsWindow = new ClassificationWindow(uidoc, typeRows, titles, dialog.TauLevel2, dialog.TauLevel1, pythonTime,
+                    new ClassificationTimings
+                    {
+                        Export = exportTime,
+                        FilePreparation = filePreparationTime,
+                        Python = pythonTime,
+                        ReportReading = reportReadingTime,
+                        Grouping = groupingTime
+                    });
+                new System.Windows.Interop.WindowInteropHelper(resultsWindow).Owner = commandData.Application.MainWindowHandle;
+                resultsWindow.ShowDialog();
                 return Result.Succeeded;
             }
             catch (Exception ex)
             {
                 string dllDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
                 string tempDir = Path.Combine(dllDir, "Temp");
-                string scriptPath = Path.Combine(dllDir, "Scripts", "predict_and_return.py");
+                string scriptPath = Path.Combine(dllDir, "Scripts", "predict_v1.py");
 
                 string detalhesErro = $"Erro: {ex.Message}\n\n" +
                                       $"Script: {scriptPath}\n" +
@@ -156,6 +217,50 @@ namespace UniclassClassifier.Commands
                 TaskDialog.Show("Erro no Classifier", detalhesErro);
                 return Result.Failed;
             }
+        }
+
+        private static List<ClassificationReportRow> ReadReport(string path)
+        {
+            var result = new List<ClassificationReportRow>();
+            using var reader = new StreamReader(path, new UTF8Encoding(true));
+            using var csv = new CsvReader(reader, new CsvConfiguration(CultureInfo.InvariantCulture)
+            {
+                HasHeaderRecord = true,
+                BadDataFound = null,
+                MissingFieldFound = null
+            });
+            csv.Read();
+            csv.ReadHeader();
+            while (csv.Read())
+            {
+                if (!long.TryParse(csv.GetField("ElementID"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var elementId))
+                    continue;
+                result.Add(new ClassificationReportRow
+                {
+                    ElementId = elementId,
+                    FamilyAndType = csv.GetField("Family and Type") ?? "",
+                    Category = csv.GetField("Category") ?? "",
+                    Code = csv.GetField("code") ?? "",
+                    Level = csv.GetField("level") ?? "",
+                    L2Pred = csv.GetField("L2_pred") ?? "",
+                    PL2 = ParseNumber(csv.GetField("p_L2")),
+                    L1Pred = csv.GetField("L1_pred") ?? "",
+                    PL1 = ParseNumber(csv.GetField("p_L1")),
+                    CategoryGroup = csv.GetField("category_group") ?? "",
+                    CategoryMismatch = bool.TryParse(csv.GetField("category_mismatch"), out var mismatch) && mismatch
+                });
+            }
+            return result;
+        }
+
+        private static double ParseNumber(string? value) =>
+            double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) ? number : 0;
+
+        private static IReadOnlyDictionary<string, string> ReadTitles(string path)
+        {
+            if (!File.Exists(path)) return new Dictionary<string, string>();
+            return JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(path, Encoding.UTF8))
+                   ?? new Dictionary<string, string>();
         }
 
         private List<Dictionary<string, string>> ExportElementData(Document doc)
@@ -196,9 +301,9 @@ namespace UniclassClassifier.Commands
 
                     var data = new Dictionary<string, string>
                     {
-                        ["ElementID"] = elem.Id.IntegerValue.ToString(),
+                        ["ElementID"] = IdString(elem.Id),
                         ["Family and Type"] = FormatString($"{type.FamilyName} - {type.Name}"),
-                        ["Category"] = FormatString(elem.Category?.Name),
+                        ["Category"] = CategoryName(bic, elem),
                         ["Volume"] = GetDouble(elem, BuiltInParameter.HOST_VOLUME_COMPUTED, Ft3ToM3),
                         ["Area"] = GetDouble(elem, BuiltInParameter.HOST_AREA_COMPUTED, Ft2ToM2),
                         ["load_bearing_status"] = FormatString(GetStructuralStatus(elem)),

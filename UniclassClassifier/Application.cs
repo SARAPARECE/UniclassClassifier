@@ -2,13 +2,13 @@
 using Autodesk.Revit.UI;
 using Nice3point.Revit.Toolkit.External;
 using UniclassClassifier.Commands;
+using System.Windows.Media.Imaging;
 
 namespace UniclassClassifier
 {
     /// <summary>
     ///     Application entry point
     /// </summary>
-    [UsedImplicitly]
     public class Application : ExternalApplication
     {
         public override void OnStartup()
@@ -18,25 +18,31 @@ namespace UniclassClassifier
 
         private void CreateRibbon()
         {
-            // Painel 1 – Classifier
-            var panelClassifier = Application.CreatePanel("Classifier", "UniclassClassifier");
+            string assemblyPath = Assembly.GetExecutingAssembly().Location;
+            Application.CreateRibbonTab("Uniclass v2");
 
-            var classifierButton = panelClassifier.AddPushButton<ClassifierCommand>("AI Classifier")
-                .SetImage("/UniclassClassifier;component/Resources/Icons/icon.png")
-                .SetLargeImage("/UniclassClassifier;component/Resources/Icons/icon.png");
+            // Painel 1 – Classifier
+            var panelClassifier = Application.CreateRibbonPanel("Uniclass v2", "Classifier v2");
+
+            var classifierButtonData = new PushButtonData(
+                "ClassifierV2",
+                "AI Classifier v2",
+                assemblyPath,
+                typeof(ClassifierCommand).FullName);
+            var classifierButton = (PushButton)panelClassifier.AddItem(classifierButtonData);
+            var classifierImage = new BitmapImage(new Uri("pack://application:,,,/UniclassClassifier_v2;component/Resources/Icons/icon.png"));
+            classifierButton.Image = classifierImage;
+            classifierButton.LargeImage = classifierImage;
 
             classifierButton.ToolTip = "Classify BIM elements using AI.";
-            classifierButton.LongDescription = "Uses trained machine learning models to automatically classify BIM elements using Uniclass codes based on geometry and metadata.";
+            classifierButton.LongDescription = "Version 2: assigns Uniclass Ss Level 1 and Level 2 codes with a model that does not use the Revit category, a confidence gate and a check of the stated category.";
 
             // Painel 2 – Data
-            var panelData = Application.CreatePanel("Data", "UniclassClassifier");
-
-            // Caminho da DLL atual
-            string assemblyPath = Assembly.GetExecutingAssembly().Location;
+            var panelData = Application.CreateRibbonPanel("Uniclass v2", "Data");
 
             // Criar os botões Export e Info
-            var exportBtnData = new PushButtonData("Export", "Export", assemblyPath, typeof(ExportCommand).FullName);
-            var infoBtnData = new PushButtonData("Info", "Info", assemblyPath, typeof(InfoCommand).FullName);
+            var exportBtnData = new PushButtonData("ExportV2", "Export", assemblyPath, typeof(ExportCommand).FullName);
+            var infoBtnData = new PushButtonData("InfoV2", "Info", assemblyPath, typeof(InfoCommand).FullName);
 
             // Adicionar botões empilhados no painel Data
             var stackedButtons = panelData.AddStackedItems(exportBtnData, infoBtnData);
@@ -45,13 +51,13 @@ namespace UniclassClassifier
             var exportButton = (PushButton)stackedButtons[0];
             exportButton.ToolTip = "Export BIM element data.";
             exportButton.LongDescription = "Exports element geometry, classification and quantities to external files (CSV or JSON).";
-            exportButton.SetImage("/UniclassClassifier;component/Resources/Icons/icon2.png");
+            exportButton.Image = new BitmapImage(new Uri("pack://application:,,,/UniclassClassifier_v2;component/Resources/Icons/icon2.png"));
 
             // Botão Info
             var infoButton = (PushButton)stackedButtons[1];
             infoButton.ToolTip = "Plugin information.";
             infoButton.LongDescription = "Displays plugin details including version, authorship and reference documentation.";
-            infoButton.SetImage("/UniclassClassifier;component/Resources/Icons/icon3.png");
+            infoButton.Image = new BitmapImage(new Uri("pack://application:,,,/UniclassClassifier_v2;component/Resources/Icons/icon3.png"));
         }
     }
 }
